@@ -10,6 +10,7 @@ const orderItemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, default: 1 },
     size: { type: String },
     color: { type: String },
+    category: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -21,7 +22,9 @@ const orderSchema = new mongoose.Schema(
     totalProfit: { type: Number, default: 0 },
     customerName: { type: String, default: "Guest" },
     customerEmail: { type: String, default: "" },
-    status: { type: String, default: "Pending" }, // Pending | Completed | Cancelled
+    customerPhone: { type: String, default: "" },
+    address: { type: String, default: "" },
+    status: { type: String, default: "Pending" }, // Pending | Shipped | Delivered | Cancelled
   },
   { timestamps: true }
 );

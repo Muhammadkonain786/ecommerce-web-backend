@@ -4,6 +4,7 @@ import cors from 'cors';
 import { connectDB } from './config/db.js';
 import Product from './models/Product.js';
 import Order from './models/Order.js';
+import Coupon from './models/Coupon.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -115,7 +116,7 @@ app.get('/api/reviews', (req, res) => {
 // Naya order place karna (checkout se call hota hai)
 app.post('/api/orders', async (req, res) => {
   try {
-    const { items, customerName, customerEmail } = req.body;
+    const { items, customerName, customerEmail, customerPhone, address } = req.body;
 
     if (!items || items.length === 0) {
       return res.status(400).json({ message: "Order mein items hone chahiye" });
@@ -142,6 +143,8 @@ app.post('/api/orders', async (req, res) => {
       totalProfit,
       customerName: customerName || "Guest",
       customerEmail: customerEmail || "",
+      customerPhone: customerPhone || "",
+      address: address || "",
     });
 
     res.status(201).json(toClient(order));
@@ -218,6 +221,137 @@ app.get('/api/admin/orders', async (req, res) => {
   }
 });
 
+// Order ka status update karna (Pending -> Shipped -> Delivered -> Cancelled)
+app.patch('/api/admin/orders/:id/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const allowed = ['Pending', 'Shipped', 'Delivered', 'Cancelled'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: "Status galat hai" });
+    }
+
+    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    if (!order) return res.status(404).json({ message: "Order nahi mila" });
+    res.json(toClient(order));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Best-selling products (order items se calculate hota hai)
+app.get('/api/admin/best-sellers', async (req, res) => {
+  try {
+    const orders = await Order.find();
+    const salesMap = {};
+
+    orders.forEach((order) => {
+      order.items.forEach((item) => {
+        const key = item.name;
+        if (!salesMap[key]) {
+          salesMap[key] = {
+            name: item.name,
+            image: item.image,
+            quantitySold: 0,
+            revenue: 0,
+          };
+        }
+        salesMap[key].quantitySold += item.quantity;
+        salesMap[key].revenue += item.price * item.quantity;
+      });
+    });
+
+    const bestSellers = Object.values(salesMap)
+      .sort((a, b) => b.quantitySold - a.quantitySold)
+      .slice(0, 10);
+
+    res.json(bestSellers);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Customers ki list (orders se derive hoti hai - name/email se group karke)
+app.get('/api/admin/customers', async (req, res) => {
+  try {
+    const orders = await Order.find();
+    const customerMap = {};
+
+    orders.forEach((order) => {
+      const key = order.customerEmail || order.customerName || 'Guest';
+      if (!customerMap[key]) {
+        customerMap[key] = {
+          name: order.customerName || 'Guest',
+          email: order.customerEmail || '',
+          totalOrders: 0,
+          totalSpent: 0,
+          lastOrderDate: order.createdAt,
+        };
+      }
+      customerMap[key].totalOrders += 1;
+      customerMap[key].totalSpent += order.totalAmount;
+      if (new Date(order.createdAt) > new Date(customerMap[key].lastOrderDate)) {
+        customerMap[key].lastOrderDate = order.createdAt;
+      }
+    });
+
+    const customers = Object.values(customerMap).sort((a, b) => b.totalSpent - a.totalSpent);
+    res.json(customers);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ---------- Coupons ----------
+
+// Saare coupons (admin ke liye)
+app.get('/api/admin/coupons', async (req, res) => {
+  try {
+    const coupons = await Coupon.find().sort({ createdAt: -1 });
+    res.json(coupons.map(toClient));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Naya coupon banana
+app.post('/api/admin/coupons', async (req, res) => {
+  try {
+    const coupon = await Coupon.create(req.body);
+    res.status(201).json(toClient(coupon));
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ message: "Ye code pehle se maujood hai" });
+    }
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Coupon delete/deactivate karna
+app.delete('/api/admin/coupons/:id', async (req, res) => {
+  try {
+    await Coupon.findByIdAndDelete(req.params.id);
+    res.json({ message: "Coupon delete ho gaya" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Public route - checkout par coupon validate karne ke liye (website use karti hai)
+app.post('/api/coupons/validate', async (req, res) => {
+  try {
+    const { code } = req.body;
+    const coupon = await Coupon.findOne({ code: (code || '').toUpperCase(), active: true });
+
+    if (!coupon) {
+      return res.status(404).json({ message: "Ye promo code valid nahi hai" });
+    }
+
+    res.json({ discountPercent: coupon.discountPercent });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Ek-baar-chalane wala seed route: browser mein URL kholne se hi chal jata hai.
 // Agar database khali hai, to starting 32 products daal deta hai. Agar products
 // pehle se maujood hain to kuch nahi karta (dobara chalane se duplicate nahi banenge).
@@ -279,16 +413,27 @@ app.get('/api/admin/seed', async (req, res) => {
 // Dashboard stats: total income, total orders, total profit, monthly chart data
 app.get('/api/admin/stats', async (req, res) => {
   try {
-    const orders = await Order.find();
+    const days = req.query.days ? parseInt(req.query.days, 10) : null;
+
+    const allOrders = await Order.find();
     const products = await Product.find();
+
+    // Agar date range di gayi hai (jaise ?days=30), to sirf usi range ke orders lein
+    let orders = allOrders;
+    if (days) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      orders = allOrders.filter((o) => new Date(o.createdAt) >= cutoff);
+    }
 
     const totalIncome = orders.reduce((sum, o) => sum + o.totalAmount, 0);
     const totalProfit = orders.reduce((sum, o) => sum + o.totalProfit, 0);
     const totalOrders = orders.length;
     const totalProducts = products.length;
     const outOfStockCount = products.filter((p) => p.stock <= 0).length;
+    const lowStockCount = products.filter((p) => p.stock > 0 && p.stock <= 5).length;
 
-    // Pichle 6 mahino ka income/profit chart data
+    // Pichle 6 mahino ka income/profit chart data (hamesha poore 6 mahine, date-range se independent)
     const monthlyMap = {};
     const now = new Date();
     for (let i = 5; i >= 0; i--) {
@@ -296,12 +441,23 @@ app.get('/api/admin/stats', async (req, res) => {
       const key = d.toLocaleString('en-US', { month: 'short' });
       monthlyMap[key] = { month: key, income: 0, profit: 0 };
     }
-    orders.forEach((o) => {
+    allOrders.forEach((o) => {
       const key = new Date(o.createdAt).toLocaleString('en-US', { month: 'short' });
       if (monthlyMap[key]) {
         monthlyMap[key].income += o.totalAmount;
         monthlyMap[key].profit += o.totalProfit;
       }
+    });
+
+    // Category-wise sales breakdown (selected date range ke hisaab se)
+    const categoryMap = {};
+    orders.forEach((o) => {
+      o.items.forEach((item) => {
+        const cat = item.category || 'other';
+        if (!categoryMap[cat]) categoryMap[cat] = { category: cat, revenue: 0, unitsSold: 0 };
+        categoryMap[cat].revenue += item.price * item.quantity;
+        categoryMap[cat].unitsSold += item.quantity;
+      });
     });
 
     res.json({
@@ -310,9 +466,26 @@ app.get('/api/admin/stats', async (req, res) => {
       totalOrders,
       totalProducts,
       outOfStockCount,
+      lowStockCount,
       monthlyChart: Object.values(monthlyMap),
+      categoryBreakdown: Object.values(categoryMap).sort((a, b) => b.revenue - a.revenue),
       recentOrders: orders.slice(0, 5).map(toClient),
     });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Bulk product upload (CSV se parse karke frontend ye array bhejta hai)
+app.post('/api/admin/products/bulk', async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ message: "Products ki list khali hai" });
+    }
+
+    const inserted = await Product.insertMany(products);
+    res.status(201).json({ message: `${inserted.length} products successfully add ho gaye!` });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
